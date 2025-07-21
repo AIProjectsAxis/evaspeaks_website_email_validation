@@ -1,10 +1,12 @@
 // src/components/VoiceWidget.tsx
 import React, { useState, useEffect, useRef } from 'react';
-import { Mic, MicOff, PhoneOff, Waves, ArrowRight, X, User, Mail } from 'lucide-react';
+import {
+  Mic, MicOff, PhoneOff, Waves,
+  ArrowRight, X, User, Mail
+} from 'lucide-react';
+import type { VoiceService } from '@vapi-ai/web';
 
 interface VoiceWidgetProps {
-  publicKey?: string;
-  onClose?: () => void;
   trigger?: 'button' | 'inline';
   buttonText?: string;
 }
@@ -16,42 +18,43 @@ interface CustomerInfo {
 }
 
 const VoiceWidget: React.FC<VoiceWidgetProps> = ({
-  publicKey = import.meta.env.VOICE_PUBLIC_KEY || "",
-  onClose,
   trigger = 'button',
-  buttonText = 'Talk to Eva'
+  buttonText = 'Talk to Eva',
 }) => {
-  const [isOpen, setIsOpen] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
+  // --- UI state ---
+  const [isOpen, setIsOpen]             = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isMuted, setIsMuted] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [error, setError] = useState('');
-  const [showForm, setShowForm] = useState(true);
-  const [customerInfo, setCustomerInfo] = useState<CustomerInfo>({
-    name: '',
-    email: '',
-    agreedToTerms: false
+  const [isConnected, setIsConnected]   = useState(false);
+  const [isMuted, setIsMuted]           = useState(false);
+  const [duration, setDuration]         = useState(0);
+  const [error, setError]               = useState('');
+
+  // --- Form state ---
+  const [showForm, setShowForm]               = useState(true);
+  const [customerInfo, setCustomerInfo]       = useState<CustomerInfo>({
+    name: '', email: '', agreedToTerms: false
   });
-  const [formErrors, setFormErrors] = useState<Partial<CustomerInfo>>({});
+  const [formErrors, setFormErrors]           = useState<Partial<CustomerInfo>>({});
   const [isValidatingEmail, setIsValidatingEmail] = useState(false);
 
-  const voiceRef = useRef<any>(null);
+  // --- Refs ---
+  const voiceRef    = useRef<InstanceType<typeof VoiceService> | null>(null);
   const durationRef = useRef<NodeJS.Timeout | null>(null);
 
+  // When widget opens and form is done, load the service
   useEffect(() => {
-    if (isOpen && !showForm) {
-      loadVoiceService();
-    }
-    return () => cleanup();
+    if (isOpen && !showForm) loadVoiceService();
+    return cleanup;
   }, [isOpen, showForm]);
 
+  // --- Email domain validation list ---
   const freeEmailProviders = [
     'gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com',
     'icloud.com','me.com','live.com','msn.com','ymail.com',
     'rocketmail.com','mail.com','protonmail.com','tutanota.com'
   ];
 
+  // --- Validate email domain via regex or remote ---
   const validateEmailDomain = async (email: string): Promise<{ isValid: boolean; error?: string }> => {
     const domain = email.split('@')[1]?.toLowerCase();
     if (!domain) return { isValid: false, error: 'Invalid email format' };
@@ -79,6 +82,7 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
     }
   };
 
+  // --- Full form validation ---
   const validateForm = async (): Promise<boolean> => {
     const errors: Partial<CustomerInfo> = {};
     if (!customerInfo.name.trim()) {
@@ -118,114 +122,102 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
     }
   };
 
-  const loadVoiceService = async () => {
+  // --- Load vAPI Web SDK using sessionToken ---
+  async function loadVoiceService() {
     try {
-      const { default: VoiceService } = await import('@vapi-ai/web');
-      voiceRef.current = new VoiceService(publicKey);
+      // fetch one-time session token
+      const res = await fetch('/.netlify/functions/get-token');
+      if (!res.ok) throw new Error('Could not fetch session token');
+      const { sessionToken } = await res.json();
+
+      // dynamic import
+      const { default: Voice } = await import('@vapi-ai/web');
+      voiceRef.current = new Voice(sessionToken);
+
+      // wire up events
       voiceRef.current.on('call-start', () => {
         setIsConnected(true);
         setIsConnecting(false);
         startTimer();
       });
       voiceRef.current.on('call-end', () => {
-        setIsConnected(false);
-        setIsConnecting(false);
-        stopTimer();
+        cleanup();
         handleClose();
       });
       voiceRef.current.on('error', (err: any) => {
-        console.error('Voice error:', err);
+        console.error(err);
         setError('Connection failed');
         setIsConnecting(false);
       });
-    } catch (err) {
-      console.error('Failed to load voice service:', err);
-      setError('Failed to load voice service');
+    } catch (err: any) {
+      console.error(err);
+      setError(err.message);
+      setIsConnecting(false);
     }
-  };
+  }
 
-  const startCall = async () => {
+  // --- Start the call ---
+  async function startCall() {
     setError('');
     setIsConnecting(true);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach(t => t.stop());
 
-      const resp = await fetch('/api/start-call', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          customerName: customerInfo.name,
-          customerEmail: customerInfo.email
-        }),
+      // kick off the WebRTC session
+      const assistantId = import.meta.env.VITE_VOICE_ASSISTANT_ID!;
+      await voiceRef.current!.start(assistantId, {
+        metadata: {
+          customerName:  customerInfo.name,
+          customerEmail: customerInfo.email,
+        }
       });
-      const data = await resp.json();
-      if (!resp.ok) throw new Error(data.error || 'Call failed');
-
-      setIsConnected(true);
-      setIsConnecting(false);
-      startTimer();
     } catch (err: any) {
-      console.error('Error starting call:', err);
+      console.error(err);
       setError(err.message || 'Failed to start call');
       setIsConnecting(false);
     }
-  };
+  }
 
-  const endCall = () => {
-    if (voiceRef.current) voiceRef.current.stop();
-    cleanup();
-    handleClose();
-  };
-
-  const toggleMute = () => {
-    if (voiceRef.current && isConnected) {
-      const m = !isMuted;
-      voiceRef.current.setMuted(m);
-      setIsMuted(m);
-    }
-  };
-
-  const startTimer = () => {
+  // --- Timer, cleanup, mute, close ---
+  function startTimer() {
     setDuration(0);
     durationRef.current = setInterval(() => setDuration(d => d + 1), 1000);
-  };
-
-  const stopTimer = () => {
-    if (durationRef.current) {
-      clearInterval(durationRef.current);
-      durationRef.current = null;
-    }
-  };
-
-  const cleanup = () => {
+  }
+  function stopTimer() {
+    if (durationRef.current) clearInterval(durationRef.current!);
+  }
+  function cleanup() {
+    stopTimer();
     setIsConnected(false);
     setIsConnecting(false);
-    setDuration(0);
-    setError('');
     setIsMuted(false);
-    stopTimer();
-  };
-
-  const handleClose = () => {
+    setDuration(0);
+  }
+  function handleClose() {
     cleanup();
     setIsOpen(false);
     setShowForm(true);
     setCustomerInfo({ name: '', email: '', agreedToTerms: false });
     setFormErrors({});
-    onClose?.();
-  };
+    setError('');
+  }
+  function toggleMute() {
+    if (voiceRef.current && isConnected) {
+      voiceRef.current.setMuted(!isMuted);
+      setIsMuted(m => !m);
+    }
+  }
+  function formatTime(sec: number) {
+    const m = Math.floor(sec/60), s = sec%60;
+    return `${m}:${s.toString().padStart(2,'0')}`;
+  }
 
-  const formatTime = (sec: number) => {
-    const m = Math.floor(sec / 60);
-    const s = sec % 60;
-    return `${m}:${s.toString().padStart(2, '0')}`;
-  };
-
+  // --- Render ---
   if (!isOpen) {
     return (
       <button onClick={() => setIsOpen(true)} className="btn-base btn-primary btn-lg">
-        <Mic size={16} />
+        <Mic size={16}/>
         <span>{buttonText}</span>
       </button>
     );
@@ -234,92 +226,77 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
   return (
     <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
       <div className="relative card-base p-8 w-full max-w-sm">
-        <button onClick={handleClose} className="absolute top-4 right-4 w-8 h-8 bg-slate-700/50 hover:bg-slate-600/50 rounded-full flex items-center justify-center">
-          <X className="w-4 h-4 text-slate-300" />
+        <button onClick={handleClose}
+                className="absolute top-4 right-4 w-8 h-8 bg-slate-700/50 hover:bg-slate-600/50 rounded-full flex items-center justify-center">
+          <X className="w-4 h-4 text-slate-300"/>
         </button>
 
         {showForm && (
-          <div className="space-y-5">
+          <form onSubmit={handleFormSubmit} className="space-y-5">
             <div className="text-center">
               <div className="w-12 h-12 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full flex items-center justify-center mx-auto mb-3">
-                <User className="w-6 h-6 text-white" />
+                <User className="w-6 h-6 text-white"/>
               </div>
               <h2 className="text-lg font-semibold mb-1 text-white">Connect with Eva</h2>
               <p className="text-slate-400 text-xs">Please provide your details</p>
             </div>
-
             <div className="space-y-3">
               <div>
                 <div className="relative">
-                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 transform -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="text"
-                    value={customerInfo.name}
-                    onChange={e => handleInputChange('name', e.target.value)}
-                    placeholder="Full name"
-                    className={`form-input ${formErrors.name ? 'border-red-500' : ''}`}
-                    style={{ paddingLeft: '2.5rem' }}
-                    onKeyPress={async e => e.key === 'Enter' && handleFormSubmit(e as any)}
-                  />
+                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 transform -translate-y-1/2 pointer-events-none"/>
+                  <input type="text"
+                         value={customerInfo.name}
+                         onChange={e => handleInputChange('name', e.target.value)}
+                         placeholder="Full name"
+                         className={`form-input ${formErrors.name ? 'border-red-500' : ''}`}
+                         style={{ paddingLeft: '2.5rem' }}/>
                 </div>
                 {formErrors.name && <p className="text-red-400 text-xs mt-1">{formErrors.name}</p>}
               </div>
 
               <div>
                 <div className="relative">
-                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 transform -translate-y-1/2 pointer-events-none" />
-                  <input
-                    type="email"
-                    value={customerInfo.email}
-                    onChange={e => handleInputChange('email', e.target.value)}
-                    placeholder="Email address"
-                    className={`form-input ${formErrors.email ? 'border-red-500' : ''}`}
-                    style={{ paddingLeft: '2.5rem' }}
-                    onKeyPress={async e => e.key === 'Enter' && handleFormSubmit(e as any)}
-                  />
+                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 transform -translate-y-1/2 pointer-events-none"/>
+                  <input type="email"
+                         value={customerInfo.email}
+                         onChange={e => handleInputChange('email', e.target.value)}
+                         placeholder="Email address"
+                         className={`form-input ${formErrors.email ? 'border-red-500' : ''}`}
+                         style={{ paddingLeft: '2.5rem' }}/>
                 </div>
                 {formErrors.email && <p className="text-red-400 text-xs mt-1">{formErrors.email}</p>}
               </div>
 
               <label className="flex items-start space-x-3 pt-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={customerInfo.agreedToTerms}
-                  onChange={e => handleInputChange('agreedToTerms', e.target.checked)}
-                  className="mt-0.5 w-4 h-4 text-cyan-500 bg-slate-700 border-slate-600 rounded focus:ring-cyan-500 focus:ring-2"
-                />
+                <input type="checkbox"
+                       checked={customerInfo.agreedToTerms}
+                       onChange={e => handleInputChange('agreedToTerms', e.target.checked)}
+                       className="mt-0.5 w-4 h-4 text-cyan-500 bg-slate-700 border-slate-600 rounded focus:ring-cyan-500 focus:ring-2"/>
                 <span className="text-xs text-slate-400">
                   I accept the{' '}
-                  <a href="/privacy" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">
-                    Privacy Policy
-                  </a>{' '}
+                  <a href="/privacy" className="text-cyan-400 underline" target="_blank" rel="noopener noreferrer">Privacy Policy</a>{' '}
                   and{' '}
-                  <a href="/terms" target="_blank" rel="noopener noreferrer" className="text-cyan-400 underline">
-                    Terms of Service
-                  </a>
+                  <a href="/terms" className="text-cyan-400 underline" target="_blank" rel="noopener noreferrer">Terms of Service</a>
                 </span>
               </label>
-              {formErrors.agreedToTerms && <p className="text-red-400 text-xs mt-1">Please accept the terms</p>}
+              {formErrors.agreedToTerms &&
+                <p className="text-red-400 text-xs mt-1">Please accept the terms</p>}
 
-              <button
-                onClick={handleFormSubmit}
-                disabled={isValidatingEmail}
-                className="btn-base btn-primary btn-md w-full mt-4"
-              >
-                {isValidatingEmail ? (
-                  <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2" />Validating...</>
-                ) : (
-                  <>Start Voice Call<ArrowRight className="w-4 h-4 ml-2" /></>
-                )}
+              <button type="submit"
+                      disabled={isValidatingEmail}
+                      className="btn-base btn-primary btn-md w-full mt-4">
+                {isValidatingEmail
+                  ? <><div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin mr-2"/>Validating...</>
+                  : <>Start Voice Call<ArrowRight className="w-4 h-4 ml-2"/></>}
               </button>
             </div>
-          </div>
+          </form>
         )}
 
         {!showForm && isConnecting && (
           <div className="text-center space-y-6">
             <div className="w-16 h-16 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full flex items-center justify-center mx-auto">
-              <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin" />
+              <div className="w-6 h-6 border-2 border-white border-t-transparent rounded-full animate-spin"/>
             </div>
             <h2 className="text-xl font-semibold text-white">Connecting...</h2>
             <p className="text-slate-400">Please allow microphone access</p>
@@ -329,18 +306,19 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
         {!showForm && isConnected && (
           <div className="text-center space-y-6">
             <div className="w-16 h-16 bg-gradient-to-r from-teal-500 to-teal-400 rounded-full flex items-center justify-center mx-auto">
-              <Waves className="w-8 h-8 text-white animate-pulse" />
+              <Waves className="w-8 h-8 text-white animate-pulse"/>
             </div>
             <h2 className="text-xl font-semibold mb-1 text-white">Connected with Eva</h2>
             <p className="text-slate-400 text-sm mb-2">Hi {customerInfo.name}!</p>
             <div className="text-2xl font-mono text-teal-400">{formatTime(duration)}</div>
             <div className="flex justify-center space-x-4">
-              <button onClick={toggleMute} className={`p-3 rounded-full ${isMuted ? 'bg-red-500/20 text-red-400' : 'bg-slate-700/50 text-slate-300'}`}>
-                {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              <button onClick={toggleMute}
+                      className={`p-3 rounded-full ${isMuted ? 'bg-red-500/20 text-red-400' : 'bg-slate-700/50 text-slate-300'}`}>
+                {isMuted ? <MicOff className="w-5 h-5"/> : <Mic className="w-5 h-5"/>}
               </button>
             </div>
-            <button onClick={endCall} className="btn-base btn-danger btn-md w-full">
-              <PhoneOff className="w-5 h-5" /><span>End Call</span>
+            <button onClick={handleClose} className="btn-base btn-danger btn-md w-full">
+              <PhoneOff className="w-5 h-5"/><span>End Call</span>
             </button>
           </div>
         )}
@@ -348,11 +326,12 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
         {!showForm && !isConnecting && !isConnected && error && (
           <div className="text-center space-y-6">
             <div className="w-16 h-16 bg-red-500/20 rounded-full flex items-center justify-center mx-auto">
-              <PhoneOff className="w-8 h-8 text-red-400" />
+              <PhoneOff className="w-8 h-8 text-red-400"/>
             </div>
             <h2 className="text-xl font-semibold text-white">Connection Error</h2>
             <p className="text-slate-400">{error}</p>
-            <button onClick={() => { setError(''); startCall(); }} className="btn-base btn-primary btn-md w-full">
+            <button onClick={() => { setError(''); startCall(); }}
+                    className="btn-base btn-primary btn-md w-full">
               Try Again
             </button>
           </div>
@@ -361,12 +340,12 @@ const VoiceWidget: React.FC<VoiceWidgetProps> = ({
         {!showForm && !isConnecting && !isConnected && !error && (
           <div className="text-center space-y-6">
             <div className="w-16 h-16 bg-gradient-to-r from-cyan-500 to-blue-500 rounded-full flex items-center justify-center mx-auto">
-              <Mic className="w-8 h-8 text-white" />
+              <Mic className="w-8 h-8 text-white"/>
             </div>
             <h2 className="text-xl font-semibold mb-2 text-white">Ready to Connect</h2>
             <p className="text-slate-400 text-sm">Hi {customerInfo.name}, let's start your voice conversation with Eva</p>
             <button onClick={startCall} className="btn-base btn-primary btn-md w-full">
-              <Mic className="w-5 h-5" /><span>Start Call</span><ArrowRight className="w-5 h-5 ml-2" />
+              <Mic className="w-5 h-5"/><span>Start Call</span><ArrowRight className="w-5 h-5 ml-2"/>
             </button>
           </div>
         )}
