@@ -1,0 +1,16 @@
+[build]
+  publish   = "dist"
+  command   = "npm run build"
+  functions = "netlify/functions"
+
+[[redirects]]
+  # expose a simple /api/* endpoint
+  from   = "/api/*"
+  to     = "/.netlify/functions/:splat"
+  status = 200
+
+[[redirects]]
+  # everything else falls back to index.html
+  from   = "/*"
+  to     = "/index.html"
+  status = 200
