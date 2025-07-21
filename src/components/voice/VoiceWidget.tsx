@@ -16,7 +16,7 @@ interface CustomerInfo {
 }
 
 const VoiceWidget: React.FC<VoiceWidgetProps> = ({
-  publicKey = import.meta.env.VITE_VOICE_PUBLIC_KEY || "",
+  publicKey = import.meta.env.VOICE_PUBLIC_KEY || "",
   onClose,
   trigger = 'button',
   buttonText = 'Talk to Eva'
